@@ -1,5 +1,5 @@
-// Version: v0.9.8.1-456-gb5a5c11
-// Last commit: b5a5c11 (2012-06-27 17:11:03 -0700)
+// Version: v0.9.8.1-484-g73ac0a4
+// Last commit: 73ac0a4 (2012-07-06 11:52:32 -0700)
 
 
 (function() {
@@ -136,8 +136,8 @@ window.ember_deprecateFunc  = Ember.deprecateFunc("ember_deprecateFunc is deprec
 
 })();
 
-// Version: v0.9.8.1-456-gb5a5c11
-// Last commit: b5a5c11 (2012-06-27 17:11:03 -0700)
+// Version: v0.9.8.1-484-g73ac0a4
+// Last commit: 73ac0a4 (2012-07-06 11:52:32 -0700)
 
 
 (function() {
@@ -1414,11 +1414,6 @@ function normalizeTuple(target, path) {
   return TUPLE_RET;
 }
 
-/** @private */
-Ember.isGlobal = function(path) {
-  return IS_GLOBAL.test(path);
-};
-
 /**
   @private
 
@@ -1482,7 +1477,8 @@ Ember.getPath = function(root, path) {
 Ember.setPath = function(root, path, value, tolerant) {
   var keyName;
 
-  if (typeof root === 'string' && IS_GLOBAL.test(root)) {
+  if (typeof root === 'string') {
+    Ember.assert("Path '" + root + "' must be global if no root is given.", IS_GLOBAL.test(root));
     value = path;
     path = root;
     root = null;
@@ -1536,7 +1532,7 @@ Ember.trySetPath = function(root, path, value) {
   @returns Boolean
 */
 Ember.isGlobalPath = function(path) {
-  return !HAS_THIS.test(path) && IS_GLOBAL.test(path);
+  return IS_GLOBAL.test(path);
 };
 
 })();
@@ -9296,6 +9292,8 @@ Ember.ArrayProxy = Ember.Object.extend(Ember.MutableArray,
     var content = get(this, 'content'),
         len     = content ? get(content, 'length') : 0;
 
+    Ember.assert("Can't set ArrayProxy's content to itself", content !== this);
+
     if (content) {
       content.addArrayObserver(this, {
         willChange: 'contentArrayWillChange',
@@ -9321,6 +9319,8 @@ Ember.ArrayProxy = Ember.Object.extend(Ember.MutableArray,
   _arrangedContentDidChange: Ember.observer(function() {
     var arrangedContent = get(this, 'arrangedContent'),
         len = arrangedContent ? get(arrangedContent, 'length') : 0;
+
+    Ember.assert("Can't set ArrayProxy's content to itself", arrangedContent !== this);
 
     if (arrangedContent) {
       arrangedContent.addArrayObserver(this, {
@@ -9519,6 +9519,10 @@ Ember.ObjectProxy = Ember.Object.extend(
     @default null
   */
   content: null,
+  /** @private */
+  _contentDidChange: Ember.observer(function() {
+    Ember.assert("Can't set ObjectProxy's content to itself", this.get('content') !== this);
+  }, 'content'),
   /** @private */
   delegateGet: function (key) {
     var content = get(this, 'content');
@@ -10544,7 +10548,6 @@ var get = Ember.get, set = Ember.set;
 Ember.HashLocation = Ember.Object.extend({
   init: function() {
     set(this, 'location', get(this, 'location') || window.location);
-    set(this, 'callbacks', Ember.A());
   },
 
   /**
@@ -10577,22 +10580,16 @@ Ember.HashLocation = Ember.Object.extend({
   */
   onUpdateURL: function(callback) {
     var self = this;
+    var guid = Ember.guidFor(this);
 
-    var hashchange = function() {
+    Ember.$(window).bind('hashchange.ember-location-'+guid, function() {
       var path = location.hash.substr(1);
       if (get(self, 'lastSetURL') === path) { return; }
 
       set(self, 'lastSetURL', null);
 
       callback(location.hash.substr(1));
-    };
-
-    get(this, 'callbacks').pushObject(hashchange);
-
-    // This won't work on old browsers anyway, but this check prevents errors
-    if (window.addEventListener) {
-      window.addEventListener('hashchange', hashchange, false);
-    }
+    });
   },
 
   /**
@@ -10609,10 +10606,9 @@ Ember.HashLocation = Ember.Object.extend({
   },
 
   willDestroy: function() {
-    get(this, 'callbacks').forEach(function(callback) {
-      window.removeEventListener('hashchange', callback, false);
-    });
-    set(this, 'callbacks', null);
+    var guid = Ember.guidFor(this);
+
+    Ember.$(window).unbind('hashchange.ember-location-'+guid);
   }
 });
 
@@ -10632,8 +10628,15 @@ var get = Ember.get, set = Ember.set;
 Ember.HistoryLocation = Ember.Object.extend({
   init: function() {
     set(this, 'location', get(this, 'location') || window.location);
-    set(this, 'callbacks', Ember.A());
+    set(this, '_initialURL', get(this, 'location').pathname);
   },
+
+  /**
+    @private
+
+    Used to give history a starting reference
+   */
+  _initialURL: null,
 
   /**
     @private
@@ -10650,12 +10653,13 @@ Ember.HistoryLocation = Ember.Object.extend({
     Uses `history.pushState` to update the url without a page reload.
   */
   setURL: function(path) {
-    var state = window.history.state;
+    var state = window.history.state,
+        initialURL = get(this, '_initialURL');
+
     if (path === "") { path = '/'; }
-    // We only want pushState to be executed if we are passing
-    // in a new path, otherwise a new state will be inserted
-    // for the same path.
-    if ((!state && path !== '/') || (state && state.path !== path)) {
+
+    if ((initialURL && initialURL !== path) || (state && state.path !== path)) {
+      set(this, '_initialURL', null);
       window.history.pushState({ path: path }, null, path);
     }
   },
@@ -10667,18 +10671,11 @@ Ember.HistoryLocation = Ember.Object.extend({
     history changes, including using forward and back buttons.
   */
   onUpdateURL: function(callback) {
-    var self = this;
+    var guid = Ember.guidFor(this);
 
-    var popstate = function(e) {
+    Ember.$(window).bind('popstate.ember-location-'+guid, function(e) {
       callback(location.pathname);
-    };
-
-    get(this, 'callbacks').pushObject(popstate);
-
-    // This won't work on old browsers anyway, but this check prevents errors
-    if (window.addEventListener) {
-      window.addEventListener('popstate', popstate, false);
-    }
+    });
   },
 
   /**
@@ -10692,10 +10689,9 @@ Ember.HistoryLocation = Ember.Object.extend({
   },
 
   willDestroy: function() {
-    get(this, 'callbacks').forEach(function(callback) {
-      window.removeEventListener('popstate', callback, false);
-    });
-    set(this, 'callbacks', null);
+    var guid = Ember.guidFor(this);
+
+    Ember.$(window).unbind('popstate.ember-location-'+guid);
   }
 });
 
@@ -14802,6 +14798,12 @@ Ember.State = Ember.Object.extend(Ember.Evented,
   }).cacheable(),
 
   /**
+    A boolean value indicating whether the state takes a context.
+    By default we assume all states take contexts.
+  */
+  hasContext: true,
+
+  /**
     This is the default transition event.
 
     @event
@@ -15321,7 +15323,6 @@ Ember.StateManager = Ember.State.extend(
   
   send: function(event, context) {
     Ember.assert('Cannot send event "' + event + '" while currentState is ' + get(this, 'currentState'), get(this, 'currentState'));
-    if (arguments.length === 1) { context = {}; }
     return this.sendRecursively(event, get(this, 'currentState'), context);
   },
 
@@ -15470,7 +15471,7 @@ Ember.StateManager = Ember.State.extend(
           exitStates.shift();
         }
 
-        currentState.pathsCache[name] = {
+        currentState.pathsCache[path] = {
           exitStates: exitStates,
           enterStates: enterStates,
           resolveState: resolveState
@@ -15488,7 +15489,7 @@ Ember.StateManager = Ember.State.extend(
           exitStates.unshift(state);
         }
 
-        useContext = context && (!get(state, 'isRoutable') || get(state, 'isDynamic'));
+        useContext = context && get(state, 'hasContext');
         matchedContexts.unshift(useContext ? contexts.pop() : null);
       }
 
@@ -15500,6 +15501,7 @@ Ember.StateManager = Ember.State.extend(
           state = getPath(state, 'states.'+initialState);
           if (!state) { break; }
           enterStates.push(state);
+          matchedContexts.push(undefined);
         }
 
         while (enterStates.length > 0) {
@@ -15730,9 +15732,10 @@ Ember.Routable = Ember.Mixin.create({
   /**
     @private
 
-    Check whether the route has dynamic segments
+    Check whether the route has dynamic segments and therefore takes
+    a context.
   */
-  isDynamic: Ember.computed(function() {
+  hasContext: Ember.computed(function() {
     var routeMatcher = get(this, 'routeMatcher');
     if (routeMatcher) {
       return routeMatcher.identifiers.length > 0;
@@ -16526,6 +16529,7 @@ Ember.StateManager.reopen(
         view;
 
     while (currentState) {
+      // TODO: Remove this when view state is removed
       if (get(currentState, 'isViewState')) {
         view = get(currentState, 'view');
         if (view) { return view; }
@@ -17957,7 +17961,7 @@ EmberHandlebars.registerHelper('with', function(context, options) {
 
     Ember.assert("You must pass a block to the with helper", options.fn && options.fn !== Handlebars.VM.noop);
 
-    if (Ember.isGlobal(path)) {
+    if (Ember.isGlobalPath(path)) {
       Ember.bind(options.data.keywords, keywordName, path);
     } else {
       normalized = normalizePath(this, path, options.data);
@@ -18937,6 +18941,7 @@ ActionHelper.registerAction = function(actionName, eventName, target, view, cont
       if (target.isState && typeof target.send === 'function') {
         return target.send(actionName, event);
       } else {
+        Ember.assert(Ember.String.fmt('Target %@ does not have action %@', [target, actionName]), target[actionName]);
         return target[actionName].call(target, event);
       }
     }
@@ -19605,7 +19610,12 @@ Ember.TextArea = Ember.View.extend(Ember.TextSupport,
 
 
 (function() {
-Ember.TabContainerView = Ember.View.extend();
+Ember.TabContainerView = Ember.View.extend({
+  init: function() {
+    Ember.deprecate("Ember.TabContainerView is deprecated and will be removed from future releases.");
+    this._super();
+  }
+});
 
 })();
 
@@ -19621,7 +19631,12 @@ Ember.TabPaneView = Ember.View.extend({
 
   isVisible: Ember.computed(function() {
     return get(this, 'viewName') === getPath(this, 'tabsContainer.currentView');
-  }).property('tabsContainer.currentView').volatile()
+  }).property('tabsContainer.currentView').volatile(),
+
+  init: function() {
+    Ember.deprecate("Ember.TabPaneView is deprecated and will be removed from future releases.");
+    this._super();
+  }
 });
 
 })();
@@ -19638,6 +19653,11 @@ Ember.TabView = Ember.View.extend({
 
   mouseUp: function() {
     setPath(this, 'tabsContainer.currentView', get(this, 'value'));
+  },
+
+  init: function() {
+    Ember.deprecate("Ember.TabView is deprecated and will be removed from future releases.");
+    this._super();
   }
 });
 
@@ -20044,7 +20064,7 @@ Ember.Handlebars.bootstrap = function(ctx) {
       // id if no name is found.
       templateName = script.attr('data-template-name') || script.attr('id'),
       template = compile(script.html()),
-      view, viewPath, elementId, tagName, options;
+      view, viewPath, elementId, options;
 
     if (templateName) {
       // For templates which have a name, we save them and then remove them from the DOM
@@ -20073,13 +20093,8 @@ Ember.Handlebars.bootstrap = function(ctx) {
       // Look for data-element-id attribute.
       elementId = script.attr('data-element-id');
 
-      // Users can optionally specify a custom tag name to use by setting the
-      // data-tag-name attribute on the script tag.
-      tagName = script.attr('data-tag-name');
-
       options = { template: template };
       if (elementId) { options.elementId = elementId; }
-      if (tagName)   { options.tagName   = tagName; }
 
       view = view.create(options);
 
@@ -20112,8 +20127,8 @@ Ember.$(document).ready(
 
 })();
 
-// Version: v0.9.8.1-456-gb5a5c11
-// Last commit: b5a5c11 (2012-06-27 17:11:03 -0700)
+// Version: v0.9.8.1-484-g73ac0a4
+// Last commit: 73ac0a4 (2012-07-06 11:52:32 -0700)
 
 
 (function() {
